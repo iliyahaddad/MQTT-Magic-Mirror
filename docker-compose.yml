@@ -1,0 +1,24 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # MQTT (ESP32, simulator)
+      - "9001:9001"   # MQTT over WebSockets (mirror UI)
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      # For secure mode, switch the config mount to mosquitto-secure.conf and uncomment:
+      # - ./mosquitto/password_file:/mosquitto/config/password_file:ro
+      # - ./mosquitto/acl:/mosquitto/config/acl:ro
+      - mosquitto-data:/mosquitto/data
+
+  mirror:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    volumes:
+      - ./mirror:/usr/share/nginx/html:ro
+
+volumes:
+  mosquitto-data:
