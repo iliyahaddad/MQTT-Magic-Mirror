@@ -1,0 +1,20 @@
+# Replace names with the usernames created using mosquitto_passwd.
+user mirror-esp32
+topic read mirror/command
+topic write mirror/+/status
+topic write mirror/+/presence
+topic write mirror/+/sensors
+topic write mirror/+/ir
+topic write mirror/+/ir/unsupported
+topic write homeassistant/sensor/+/+/config
+
+user mirror-browser
+topic read mirror/#
+topic write mirror/command
+
+user weather-bridge
+topic write mirror/weather
+
+# Optional: account allowed to push notifications to the mirror
+user mirror-notify
+topic write mirror/message
