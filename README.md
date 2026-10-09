@@ -127,4 +127,4 @@ GitHub Actions compiles the PlatformIO firmware, checks the Python simulator and
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+ See [LICENSE](LICENSE).
