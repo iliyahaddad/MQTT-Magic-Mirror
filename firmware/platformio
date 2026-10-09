@@ -1,0 +1,11 @@
+[env:esp32dev]
+platform = espressif32
+board = esp32dev
+framework = arduino
+monitor_speed = 115200
+lib_deps =
+    knolleary/PubSubClient@^2.8
+    bblanchon/ArduinoJson@^7.0.0
+    adafruit/DHT sensor library@^1.4.6
+    adafruit/Adafruit Unified Sensor@^1.1.14
+    crankyoank/IRremoteESP8266@^2.8.6
