@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MQTT Magic Mirror</title>
+<style>
+/* True black on purpose: behind two-way glass, black pixels are see-through. */
+:root{--ink:#fff;--dim:rgba(255,255,255,.58);--faint:rgba(255,255,255,.3);--ok:#8fd9a8;--bad:#e58a82}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;background:#000;color:var(--ink);overflow:hidden;
+  font-family:"Helvetica Neue","Segoe UI Variable","Segoe UI",system-ui,sans-serif;font-weight:200}
+main{height:100%;display:grid;grid-template-rows:auto 1fr auto;padding:5vmin;transition:opacity 1.5s ease}
+body.asleep main{opacity:0}
+header{display:flex;justify-content:space-between;align-items:flex-start;font-size:clamp(16px,2.4vmin,28px);color:var(--dim)}
+header b{font-weight:300;color:var(--ink);font-size:1.6em}
+#link{display:flex;align-items:center;gap:.6em}
+#link i{width:.6em;height:.6em;border-radius:50%;background:var(--bad)}
+body.online #link i{background:var(--ok)}
+section{display:none;align-self:center}
+body[data-view=home] #home,body[data-view=devices] #devices,body[data-view=sensors] #sensors,body[data-view=control] #control,body[data-view=weather] #weather{display:block}
+#time{font-size:clamp(72px,24vmin,360px);line-height:.95;letter-spacing:-.03em;font-weight:100}
+#sec{font-size:.28em;color:var(--faint);letter-spacing:0;margin-left:.2em}
+#date{font-size:clamp(20px,3.6vmin,44px);color:var(--dim);margin-top:1.2vmin}
+#devlist li{list-style:none;font-size:clamp(18px,3vmin,34px);padding:1.2vmin 0;display:flex;gap:1.2em;align-items:baseline}
+#devlist li span{color:var(--dim);font-size:.7em}
+#devlist li.off{color:var(--faint)}
+#devlist li .meta{display:flex;flex-direction:column;gap:.25em}
+#devlist li .lastseen{font-size:.55em;color:var(--faint)}
+#sensor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:2vmin;max-height:58vh;overflow:auto}
+.sensor-card{border:1px solid rgba(255,255,255,.18);padding:2vmin;border-radius:1vmin}
+.sensor-card h2{font-size:clamp(16px,2.4vmin,28px);font-weight:300;margin-bottom:1vmin}
+.sensor-value{font-size:clamp(28px,5vmin,64px);font-weight:200}
+.sparkline{width:100%;height:64px;display:block;margin-top:1vmin}
+.sensor-note{font-size:.65em;color:var(--faint);margin-top:.6vmin}
+footer{min-height:12vmin;font-size:clamp(18px,3vmin,34px)}
+#msgs p{margin-top:.8vmin}
+#msgs p::before{content:"";display:inline-block;width:2.2em;height:1px;background:var(--faint);vertical-align:middle;margin-right:.8em}
+#hint{color:var(--faint);font-size:.6em;margin-top:2vmin}
+@media (prefers-reduced-motion:reduce){main{transition:none}}
+:focus-visible{outline:2px solid var(--ink);outline-offset:4px}
+#control,#weather{font-size:clamp(18px,2.5vmin,30px)} .controls{display:flex;gap:1em;flex-wrap:wrap;margin-top:1em} button{background:#111;color:#fff;border:1px solid #777;border-radius:8px;padding:.7em 1em;font:inherit;cursor:pointer} input{background:#111;color:#fff;border:1px solid #777;padding:.6em;font:inherit;width:7em} .small{font-size:.65em;color:var(--dim);margin-top:1em}
+</style>
+</head>
+<body data-view="home">
+<main>
+  <header>
+    <div id="climate"><b id="temp">--</b> <span id="hum"></span></div>
+    <div id="link"><span id="linktext">Connecting…</span><i></i></div>
+  </header>
+  <section id="home">
+    <div id="time">--:--<span id="sec"></span></div>
+    <div id="date"></div>
+  </section>
+  <section id="devices"><ul id="devlist"></ul></section>
+  <section id="sensors"><div id="sensor-grid"></div></section>
+  <section id="control"><h2>IR Remote Control</h2><p class="small">Sends commands through MQTT to a node with an IR transmitter.</p><div class="controls"><button data-ir="tv_power">TV power</button><button data-ir="tv_volume_up">Volume +</button><button data-ir="tv_volume_down">Volume −</button><button data-ir="ac_on">AC on</button><button data-ir="ac_off">AC off</button></div></section>
+  <section id="weather"><h2 id="weather-title">Local weather bridge</h2><p id="weather-line">Waiting for mirror/weather…</p><p id="weather-updated" class="small"></p><p id="date-fa" class="small" dir="rtl" lang="fa"></p></section>
+  <footer>
+    <div id="msgs" aria-live="polite"></div>
+    <div id="hint">Click / press any key: next view · 1 clock · 2 devices · 3 sensors · 4 IR · 5 weather · H wake</div>
+  </footer>
+</main>
+
+<script src="./mqtt-ws.js"></script>
+<script>
+// Config: edit here, or override with ?broker=ws://host:9001&sleepAfterMs=15000
+const params = new URLSearchParams(location.search);
+const overrides = window.MIRROR_CONFIG || {};
+const cfg = {
+  broker: params.get("broker") || overrides.broker || `ws://${location.hostname || "localhost"}:9001`,
+  topic: overrides.topic || "mirror/#",
+  sleepAfterMs: Number(params.get("sleepAfterMs") ?? overrides.sleepAfterMs ?? 15000),
+  messageTtlMs: Number(params.get("messageTtlMs") ?? overrides.messageTtlMs ?? 30000),
+  views: (Array.isArray(overrides.views) ? overrides.views : []).filter(v => ["home","devices","sensors","control","weather"].includes(v)).length ? overrides.views.filter(v => ["home","devices","sensors","control","weather"].includes(v)) : ["home", "devices", "sensors", "control", "weather"],
+  rotateMs: Number(params.get("rotateMs") ?? overrides.rotateMs ?? 0),
+  alert: {tempLow: Number(overrides.tempLow ?? 10), tempHigh: Number(overrides.tempHigh ?? 30), humLow: Number(overrides.humLow ?? 20), humHigh: Number(overrides.humHigh ?? 70), cooldownMs: Number(overrides.alertCooldownMs ?? 900000)},
+  commandTopic: overrides.commandTopic || "mirror/command",
+  mqttUsername: overrides.mqttUsername || "", mqttPassword: overrides.mqttPassword || "",
+  locale: params.get("locale") || overrides.locale || undefined
+};
+// Reject invalid URLs and keep user-controlled timers within sensible limits.
+try {
+  const brokerUrl = new URL(cfg.broker, location.href);
+  if (!['ws:', 'wss:'].includes(brokerUrl.protocol)) throw new Error('Broker URL must use ws:// or wss://');
+  cfg.broker = brokerUrl.href;
+} catch (error) {
+  console.error('Invalid MQTT broker URL:', error);
+  cfg.broker = `ws://${location.hostname || "localhost"}:9001`;
+}
+if (!Number.isFinite(cfg.sleepAfterMs)) cfg.sleepAfterMs = 15000;
+if (!Number.isFinite(cfg.messageTtlMs)) cfg.messageTtlMs = 30000;
+cfg.sleepAfterMs = Math.max(0, Math.min(cfg.sleepAfterMs, 86400000));
+cfg.messageTtlMs = Math.max(1000, Math.min(cfg.messageTtlMs, 86400000));
+
+const $ = id => document.getElementById(id);
+const devices = {};          // id -> {status, temp, hum, presence, ir, seen}
+const history = {};          // id -> bounded in-memory climate history
+const HISTORY_LIMIT = 36;
+let messages = [], sleepTimer = null, viewIdx = 0;
+const alertState = new Map(); let weather = null;
+
+// ---------- clock ----------
+function tick() {
+  const d = new Date();
+  $("time").firstChild.nodeValue = d.toLocaleTimeString(cfg.locale, {hour: "2-digit", minute: "2-digit", hour12: false});
+  $("sec").textContent = String(d.getSeconds()).padStart(2, "0");
+  $("date").textContent = d.toLocaleDateString(cfg.locale, {weekday: "long", day: "numeric", month: "long"});
+  try { $("date-fa").textContent = "تقویم شمسی: " + d.toLocaleDateString("fa-IR-u-ca-persian", {weekday:"long", year:"numeric", month:"long", day:"numeric"}); } catch (_) {}
+  const now = Date.now();
+  messages = messages.filter(m => m.until > now);
+  renderMessages();
+}
+
+// ---------- rendering (textContent only: MQTT payloads are untrusted) ----------
+function renderClimate() {
+  const withT = Object.values(devices).filter(d => d.temp != null).sort((a, b) => b.seen - a.seen)[0];
+  $("temp").textContent = withT ? `${withT.temp.toFixed(1)}°` : "--";
+  $("hum").textContent = withT && withT.hum != null ? `${Math.round(withT.hum)}% humidity` : "";
+}
+function renderMessages() {
+  const box = $("msgs");
+  box.replaceChildren(...messages.slice(-3).map(m => { const p = document.createElement("p"); p.textContent = m.text; return p; }));
+}
+function renderDevices() {
+  const ul = $("devlist");
+  const ids = Object.keys(devices);
+  if (!ids.length) { const li = document.createElement("li"); li.textContent = "No devices yet. Power on a sensor node or run tools/simulator.py."; ul.replaceChildren(li); return; }
+  ul.replaceChildren(...ids.map(id => {
+    const d = devices[id], li = document.createElement("li");
+    li.className = d.status === "online" ? "" : "off";
+    const meta = document.createElement("div"); meta.className = "meta";
+    const name = document.createElement("div"); name.textContent = id;
+    const st = document.createElement("span");
+    st.textContent = [d.status || "unknown",
+      d.presence === "1" ? "someone is here" : d.presence === "0" ? "room empty" : "",
+      d.ir ? `last remote: ${d.ir}` : ""].filter(Boolean).join(" • ");
+    const seen = document.createElement("span"); seen.className = "lastseen";
+    seen.textContent = d.seen ? `Last message ${Math.max(0, Math.floor((Date.now()-d.seen)/1000))}s ago` : "No messages yet";
+    meta.append(name, st, seen); li.append(meta);
+    return li;
+  }));
+}
+function renderSensors() {
+  const grid = $("sensor-grid");
+  const ids = Object.keys(devices).filter(id => devices[id].temp != null || devices[id].hum != null);
+  if (!ids.length) { const p = document.createElement("p"); p.textContent = "Waiting for temperature and humidity readings…"; grid.replaceChildren(p); return; }
+  grid.replaceChildren(...ids.map(id => {
+    const d = devices[id], card = document.createElement("article"); card.className = "sensor-card";
+    const title = document.createElement("h2"); title.textContent = id;
+    const value = document.createElement("div"); value.className = "sensor-value";
+    value.textContent = `${d.temp != null ? d.temp.toFixed(1) + "°C" : "--"}  ${d.hum != null ? Math.round(d.hum) + "%" : ""}`;
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg"); svg.setAttribute("viewBox", "0 0 300 64"); svg.setAttribute("class", "sparkline"); svg.setAttribute("role", "img"); svg.setAttribute("aria-label", `Recent temperature history for ${id}`);
+    const vals = (history[id] || []).map(x => x.temp).filter(Number.isFinite);
+    if (vals.length > 1) {
+      const lo = Math.min(...vals), hi = Math.max(...vals), span = Math.max(hi-lo, 0.1);
+      const points = vals.map((v, i) => `${i * 300/(vals.length-1)},${58 - ((v-lo)/span)*50}`).join(" ");
+      const line = document.createElementNS(svg.namespaceURI, "polyline"); line.setAttribute("points", points); line.setAttribute("fill", "none"); line.setAttribute("stroke", "white"); line.setAttribute("stroke-width", "2"); svg.append(line);
+    }
+    const note = document.createElement("p"); note.className = "sensor-note"; note.textContent = `${vals.length} recent samples · history resets when the page reloads`;
+    card.append(title, value, svg, note); return card;
+  }));
+}
+function setView(i) { const views = cfg.views; viewIdx = (i + views.length) % views.length; document.body.dataset.view = views[viewIdx]; }
+function armSleep() {   // sleep only if presence is known and nobody is there; offline nodes are ignored
+  clearTimeout(sleepTimer);
+  const known = Object.values(devices).filter(d => d.presence != null && d.status !== "offline");
+  if (!known.length || known.some(d => d.presence === "1") || cfg.sleepAfterMs === 0) return;
+  sleepTimer = setTimeout(() => document.body.classList.add("asleep"), cfg.sleepAfterMs);
+}
+function wake() { clearTimeout(sleepTimer); document.body.classList.remove("asleep"); armSleep(); }
+function evaluatePresence() {
+  const known = Object.values(devices).filter(d => d.presence != null && d.status !== "offline");
+  if (!known.length) return;
+  if (known.some(d => d.presence === "1")) wake(); else armSleep();
+}
+
+function notify(text, key) {
+  const now=Date.now(), last=alertState.get(key)||0;
+  if(now-last < Math.max(60000, Number(cfg.alert.cooldownMs)||900000)) return;
+  alertState.set(key,now); messages.push({text:String(text).slice(0,140),until:now+cfg.messageTtlMs});
+  if(messages.length>50) messages=messages.slice(-50); renderMessages(); wake();
+}
+function evaluateClimateAlert(id,d) {
+  if(Number.isFinite(d.temp)) { if(d.temp>cfg.alert.tempHigh) notify(`High temperature on ${id}: ${d.temp.toFixed(1)}°C`,`t-hi-${id}`); else if(d.temp<cfg.alert.tempLow) notify(`Low temperature on ${id}: ${d.temp.toFixed(1)}°C`,`t-lo-${id}`); else {alertState.delete(`t-hi-${id}`);alertState.delete(`t-lo-${id}`);} }
+  if(Number.isFinite(d.hum)) { if(d.hum>cfg.alert.humHigh) notify(`High humidity on ${id}: ${Math.round(d.hum)}%`,`h-hi-${id}`); else if(d.hum<cfg.alert.humLow) notify(`Low humidity on ${id}: ${Math.round(d.hum)}%`,`h-lo-${id}`); else {alertState.delete(`h-hi-${id}`);alertState.delete(`h-lo-${id}`);} }
+}
+function renderWeather(j) { weather=j; $("weather-title").textContent = j.city ? `Weather · ${String(j.city).slice(0,60)}` : "Local weather bridge"; const parts=[]; if(Number.isFinite(j.temp))parts.push(`${j.temp}°C`);if(Number.isFinite(j.hum))parts.push(`${j.hum}% humidity`);if(j.condition)parts.push(String(j.condition).slice(0,80));if(j.wind)parts.push(`Wind ${String(j.wind).slice(0,30)}`);$("weather-line").textContent=parts.join(" · ")||"Weather payload received";$("weather-updated").textContent="Updated locally via MQTT"; }
+
+// ---------- MQTT ----------
+function handle(topic, raw) {
+  const parts = topic.split("/");                 // mirror/<id>/<kind>  or  mirror/message
+  if (parts[0] !== "mirror") return;
+  if (topic === "mirror/weather") { try { const j=JSON.parse(raw); if(j&&typeof j==="object"&&!Array.isArray(j))renderWeather(j); } catch(_) {} return; }
+  if (parts.length === 2 && parts[1] === "message") {
+    let text = raw, ttl = cfg.messageTtlMs;
+    try {
+      const j = JSON.parse(raw);
+      if (j && typeof j === "object" && !Array.isArray(j)) {
+        if (j.text != null) text = String(j.text);
+        if (j.ttl != null && Number.isFinite(Number(j.ttl))) ttl = Number(j.ttl) * 1000;
+      }
+    } catch (_) { /* Plain-text notifications are supported. */ }
+    ttl = Math.max(1000, Math.min(Number.isFinite(ttl) ? ttl : cfg.messageTtlMs, 86400000));
+    messages.push({text: text.slice(0, 140), until: Date.now() + ttl});
+    if (messages.length > 50) messages = messages.slice(-50);
+    renderMessages(); wake(); return;
+  }
+  if (parts.length !== 3) return;
+  const [, id, kind] = parts;
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(id)) return;
+  if (!['status', 'presence', 'sensors', 'ir'].includes(kind)) return;
+  const d = devices[id] || (devices[id] = {});
+  d.seen = Date.now();
+  try {
+    if (kind === "status") {
+      if (raw === "online" || raw === "offline") d.status = raw;
+    }
+    else if (kind === "presence") {
+      if (raw !== "1" && raw !== "0") return;
+      d.presence = raw;
+    }
+    else if (kind === "sensors") {
+      const j = JSON.parse(raw);
+      if (!j || typeof j !== "object" || Array.isArray(j)) return;
+      if (Number.isFinite(j.temp) && j.temp >= -50 && j.temp <= 100) d.temp = j.temp;
+      if (Number.isFinite(j.hum) && j.hum >= 0 && j.hum <= 100) d.hum = j.hum;
+      evaluateClimateAlert(id,d);
+      if (d.temp != null || d.hum != null) {
+        const samples = history[id] || (history[id] = []);
+        samples.push({at: Date.now(), temp: d.temp, hum: d.hum});
+        if (samples.length > HISTORY_LIMIT) samples.splice(0, samples.length - HISTORY_LIMIT);
+      }
+    }
+    else if (kind === "ir") {
+      const j = JSON.parse(raw);
+      if (!j || typeof j !== "object") return;
+      d.ir = String(j.code || "").slice(0, 40); setView(viewIdx + 1); wake();
+    }
+  } catch (e) { console.warn("Bad payload on", topic, e); }
+  renderClimate(); renderDevices(); renderSensors(); evaluatePresence();
+}
+
+function setLink(ok, text) { document.body.classList.toggle("online", ok); $("linktext").textContent = text; }
+let mqttClient = null;
+if (typeof mqtt === "undefined") {
+  setLink(false, "MQTT library unavailable");
+} else {
+const client = mqttClient = mqtt.connect(cfg.broker, {reconnectPeriod: 2000, clean: true, connectTimeout: 10000, username: cfg.mqttUsername, password: cfg.mqttPassword});
+client.on("connect", () => { setLink(true, "Connected"); client.subscribe(cfg.topic, error => { if (error) setLink(false, "Subscribe failed"); }); });
+client.on("reconnect", () => setLink(false, "Reconnecting…"));
+client.on("offline", () => setLink(false, "Broker offline"));
+client.on("error", e => { setLink(false, "Connection error"); console.error(e); });
+client.on("message", (t, p) => handle(t, p.toString()));
+}
+
+addEventListener("click", () => { wake(); setView(viewIdx + 1); });
+addEventListener("keydown", event => {
+  wake();
+  const viewKeys = { "1": "home", "2": "devices", "3": "sensors", "4": "control", "5": "weather" };
+  if (viewKeys[event.key]) {
+    const target = cfg.views.indexOf(viewKeys[event.key]);
+    if (target >= 0) setView(target);
+  } else if (event.key.toLowerCase() === "h") document.body.classList.remove("asleep");
+  else if (event.key === "ArrowRight" || event.key === "PageDown" || event.key === " ") setView(viewIdx + 1);
+  else if (event.key === "ArrowLeft" || event.key === "PageUp") setView(viewIdx - 1);
+});
+document.querySelectorAll("[data-ir]").forEach(btn=>btn.addEventListener("click", ev=>{ev.stopPropagation(); if(mqttClient&&mqttClient.connected){mqttClient.publish(cfg.commandTopic,JSON.stringify({type:"ir",command:btn.dataset.ir,ts:Date.now()}));notify(`IR command sent: ${btn.dataset.ir}`,`ir-${btn.dataset.ir}`)}else notify("MQTT is offline; IR command not sent","ir-offline")}));
+let touchX = null;
+addEventListener("touchstart", e => { touchX = e.touches[0].clientX; }, {passive: true});
+addEventListener("touchend", e => { if (touchX == null) return; const dx = e.changedTouches[0].clientX - touchX; touchX = null; if (Math.abs(dx) > 60) { wake(); setView(viewIdx + (dx < 0 ? 1 : -1)); } }, {passive: true});
+if (cfg.rotateMs >= 3000) setInterval(() => { if (!document.body.classList.contains("asleep")) setView(viewIdx + 1); }, Math.min(cfg.rotateMs, 3600000));
+setView(0); renderDevices(); renderSensors(); tick(); setInterval(() => { tick(); renderDevices(); }, 1000);
+</script>
+</body>
+</html>
