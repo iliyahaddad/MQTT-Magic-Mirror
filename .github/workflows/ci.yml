@@ -1,0 +1,41 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install platformio
+      - run: cp firmware/include/config.example.h firmware/include/config.h
+      - run: pio run -d firmware
+  simulator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r tools/requirements.txt
+      - run: python -m py_compile tools/simulator.py bridge/publish_weather.py tests/smoke.py
+      - run: python tests/smoke.py
+
+  mirror-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check browser JavaScript syntax
+        run: |
+          python - <<'PYCODE'
+          from pathlib import Path
+          import re
+          html = Path("mirror/index.html").read_text()
+          scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+          assert scripts, "Inline application script not found"
+          Path("/tmp/mirror-ui.js").write_text(scripts[-1])
+          PYCODE
+          node --check /tmp/mirror-ui.js
+          node --check mirror/mqtt-ws.js
